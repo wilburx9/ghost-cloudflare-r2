@@ -16,6 +16,7 @@ import {
   PutObjectCommand,
   HeadObjectCommand,
   GetObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import path from 'path';
 import {readFile} from 'fs';
@@ -336,8 +337,48 @@ export default class CloudflareR2Adapter extends StorageBase {
 
   delete(fileName: string, targetDir?: string): Promise<boolean> {
     log.debug('delete():', 'filename:', fileName, 'targetDir:', targetDir);
-    log.error('Cloudflare R2 Storage Adapter: delete() is not implemented');
-    return Promise.resolve(false);
+    let targetPath: string;
+    if (targetDir === undefined) {
+      targetPath = fileName;
+    } else {
+      targetPath = path.join(targetDir, fileName);
+    }
+    return new Promise((resolve, reject) => {
+      this.S3.send(
+        new DeleteObjectCommand({
+          Bucket: this.bucket,
+          Key: stripLeadingSlash(targetPath),
+        })
+      )
+        .then(
+          value => {
+            // S3 returns 204 for successful delete, 200 for some providers
+            if (
+              value.$metadata.httpStatusCode === 204 ||
+              value.$metadata.httpStatusCode === 200
+            ) {
+              resolve(true);
+            } else {
+              log.warn('delete(): unexpected status', value.$metadata.httpStatusCode);
+              resolve(false);
+            }
+          },
+          reason => {
+            // If NotFound, treat as not existing (still a success for delete)
+            if (reason && reason.name === 'NoSuchKey') {
+              log.info('delete(): ', 'file:', targetPath, 'not found')
+              resolve(false);
+            } else {
+              log.error('delete() error:', reason);
+              reject(reason);
+            }
+          }
+        )
+        .catch(err => {
+          log.error('delete() exception:', err);
+          reject(err);
+        });
+    });
   }
 
   exists(fileName: string, targetDir?: string): Promise<boolean> {
