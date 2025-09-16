@@ -335,6 +335,10 @@ export default class CloudflareR2Adapter extends StorageBase {
     log.debug('Initialisation done');
   }
 
+  urlToPath(url: string) {
+    return url.replace(this.domain, '');
+  }
+
   delete(fileName: string, targetDir?: string): Promise<boolean> {
     log.debug('delete():', 'filename:', fileName, 'targetDir:', targetDir);
     let targetPath: string;
