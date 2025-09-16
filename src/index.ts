@@ -22,7 +22,6 @@ import {readFile} from 'fs';
 
 export interface FileInfo extends StorageBase.Image {
   originalname?: string;
-  targetDir?: string;
   newPath?: string;
   originalPath?: string;
   fieldname?: string;
@@ -282,7 +281,8 @@ export default class CloudflareR2Adapter extends StorageBase {
     if (config.GHOST_STORAGE_ADAPTER_R2_RESPONSIVE_IMAGES === true) {
       // Ghost checks if a 'saveRaw' function exists on the storage adapter,
       // if it exists, the theme will generate srcset attribute in the HTML.
-      this.saveRaw = function () {};
+      this.saveRaw = function () {
+      };
     }
 
     if (config.storage_type_images === true) {
@@ -332,10 +332,6 @@ export default class CloudflareR2Adapter extends StorageBase {
       },
     });
     log.debug('Initialisation done');
-  }
-
-  urlToPath(url: string) {
-    return url.replace(this.domain, '');
   }
 
   delete(fileName: string, targetDir?: string): Promise<boolean> {
@@ -437,8 +433,7 @@ export default class CloudflareR2Adapter extends StorageBase {
   saveResizedImages(
     fileInfo: FileInfo,
     fileBuffer: Buffer,
-    originalUuid: string | null,
-    isImport: boolean
+    originalUuid: string | null
   ): Promise<boolean> {
     log.info(
       'Cloudflare R2 Storage Adapter: saveResizedImages(): fileInfo:',
@@ -447,60 +442,38 @@ export default class CloudflareR2Adapter extends StorageBase {
 
     return new Promise((resolve, reject) => {
       Promise.all(
-        this.resizeWidths.map(width => {
+        this.resizeWidths.map(async width => {
           let directory = this.getTargetDir(
             `${stripEndingSlash(this.pathPrefix)}/size/w${width}`
           );
 
-          if (isImport) {
-            // transform /content/images/2022/12/image.jpg
-            // Into /content_prefix/content/images/size/w_x/2022/12
-            if (fileInfo.newPath === undefined) {
-              reject(`Could not determine newPath for image ${fileInfo.path}`);
-              return;
-            }
-
-            const oldDir = stripLeadingSlash(fileInfo.newPath)
-              .split('/')
-              .slice(0, -1);
-            if (oldDir === undefined) {
-              reject(`Could not determine newPath for image ${fileInfo.path}`);
-              return;
-            }
-            // WARNING: assume old path structure was in the format /content/images/size/wX/image.jpg
-            directory = `${this.contentPrefix}/${oldDir[0]}/${oldDir[1]}/size/w${width}/${oldDir[2]}/${oldDir[3]}`;
-          }
-
-          return Promise.all([
-            this.getUniqueFileName(fileInfo, directory, originalUuid),
-            this.jpegQuality && fileInfo.type === 'image/jpeg'
-              ? sharp(fileBuffer)
+          try {
+            const [filePathR2, resizedBuffer] = await Promise.all([
+              this.getUniqueFileName(fileInfo, directory, originalUuid),
+              this.jpegQuality && fileInfo.type === 'image/jpeg'
+                ? sharp(fileBuffer)
                   .resize({width: width})
                   .jpeg({quality: this.jpegQuality})
                   .toBuffer()
-              : sharp(fileBuffer).resize({width: width}).toBuffer(),
-          ])
-            .then(([filePathR2, resizedBuffer]) => {
-              log.debug(
-                'Cloudflare R2 Storage Adapter: saveResizedImages(): saving',
-                filePathR2
-              );
-
-              return this.S3.send(
-                new PutObjectCommand({
-                  Bucket: this.bucket,
-                  Body: resizedBuffer,
-                  ContentType: fileInfo.type,
-                  CacheControl: `max-age=${30 * 24 * 60 * 60}`,
-                  Key: stripLeadingSlash(filePathR2),
-                })
-              ).then(() => {
-                log.info('Saved', filePathR2);
-              });
-            })
-            .catch(reason => {
-              reject(reason);
-            });
+                : sharp(fileBuffer).resize({width: width}).toBuffer(),
+            ]);
+            log.debug(
+              'Cloudflare R2 Storage Adapter: saveResizedImages(): saving',
+              filePathR2
+            );
+            await this.S3.send(
+              new PutObjectCommand({
+                Bucket: this.bucket,
+                Body: resizedBuffer,
+                ContentType: fileInfo.type,
+                CacheControl: `max-age=${30 * 24 * 60 * 60}`,
+                Key: stripLeadingSlash(filePathR2),
+              })
+            );
+            log.info('Saved', filePathR2);
+          } catch (reason) {
+            reject(reason);
+          }
         })
       )
         .then(() => {
@@ -546,29 +519,17 @@ export default class CloudflareR2Adapter extends StorageBase {
       targetDir
     );
 
-    let isImport = false;
-    if (targetDir) {
-      log.info('Cloudflare R2 Storage Adapter: save(): Detected import.');
-      isImport = true;
-      fileInfo.name = path.basename(fileInfo.name);
-      fileInfo.ext = path.extname(fileInfo.name);
-    }
-
     let directory = this.getTargetDir(this.pathPrefix);
-
-    // getTargetDir adds year/month. For import we want the original path
-    if (isImport) {
-      directory =
-        this.contentPrefix +
-        fileInfo.newPath?.split('/').slice(0, -1).join('/');
-    }
+    log.info(
+      'Cloudflare R2 Storage Adapter: save(): directory: ',
+      directory
+    );
 
     return new Promise((resolve, reject) => {
       if (
         !this.saveOriginal &&
         this.isOriginalImage(fileInfo) &&
-        this.ghostResize &&
-        !isImport
+        this.ghostResize
       ) {
         log.info(
           'Cloudflare R2 Storage Adapter: save(): discarding original: ',
@@ -581,7 +542,7 @@ export default class CloudflareR2Adapter extends StorageBase {
       }
 
       let uuid: string | null = null;
-      if (this.uuidName && !isImport) {
+      if (this.uuidName) {
         uuid = forceUuid || uuidv4();
       }
 
@@ -604,16 +565,12 @@ export default class CloudflareR2Adapter extends StorageBase {
 
           let metadata = {};
           if (this.saveOrigNameMetadata) {
-            if (isImport) {
-              metadata = {original_name: path.basename(fileInfo.name)};
-            } else {
-              if (fileInfo.originalname === undefined) {
-                throw new Error(
-                  'save(): originalname is not defined for non import, could not save original name metadata'
-                );
-              }
-              metadata = {original_name: path.basename(fileInfo.originalname)};
+            if (fileInfo.originalname === undefined) {
+              throw new Error(
+                'save(): originalname is not defined for non import, could not save original name metadata'
+              );
             }
+            metadata = {original_name: path.basename(fileInfo.originalname)};
           }
           this.S3.send(
             new PutObjectCommand({
@@ -629,13 +586,12 @@ export default class CloudflareR2Adapter extends StorageBase {
               log.info('Saved', filePathR2);
               if (
                 ((this.ghostResize && !this.isOriginalImage(fileInfo)) ||
-                  (!this.ghostResize && this.isOriginalImage(fileInfo)) ||
-                  isImport) &&
+                  (!this.ghostResize && this.isOriginalImage(fileInfo))) &&
                 this.responsiveImages &&
                 this.storageType === StorageType.Images
               ) {
                 log.info('Generating different image sizes...');
-                this.saveResizedImages(fileInfo, fileBuffer, uuid, isImport)
+                this.saveResizedImages(fileInfo, fileBuffer, uuid)
                   .then(() => {
                     log.info('Generating different image sizes... Done');
                     resolve(`${this.domain}/${stripLeadingSlash(filePathR2)}`);
